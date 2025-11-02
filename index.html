@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Caro </title>
+<style>
+:root{
+  --cell-size:46px; --gap:6px;
+  --bg: linear-gradient(135deg,#f0f4ff,#eef9f7);
+  --accent: #0b84ff;
+}
+*{box-sizing:border-box}
+body{
+  margin:0;font-family:system-ui,Segoe UI,Roboto,Arial;background:var(--bg);
+  min-height:100vh;display:flex;align-items:center;justify-content:center;padding:18px;
+}
+.app{width:100%;max-width:1024px;background:#fff;border-radius:12px;padding:18px;box-shadow:0 12px 36px rgba(6,24,44,.08)}
+h1{margin:0 0 10px;font-size:20px}
+.controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+label{font-size:14px;color:#222}
+select,button{padding:8px 10px;border-radius:8px;border:1px solid #d0d7e6;background:#fff;font-size:14px}
+button.primary{background:var(--accent);color:#fff;border:0;cursor:pointer}
+#board{display:grid;gap:var(--gap);margin-top:12px;justify-content:center}
+.cell{width:var(--cell-size);height:var(--cell-size);display:flex;align-items:center;justify-content:center;border-radius:8px;background:#fff;border:1px solid #d6dee9;font-size:20px;cursor:pointer;transition:transform .08s,background .12s}
+.cell:hover{transform:translateY(-3px);background:#f0f8ff}
+.cell.x{color:#123a8a;font-weight:800}
+.cell.o{color:#a01f1f;font-weight:800}
+.cell.win{animation:rainbow 1.1s infinite alternate;border-color:rgba(255,183,77,.9)}
+@keyframes rainbow{0%{background:#ff595e}20%{background:#ffca3a}40%{background:#8ac926}60%{background:#1982c4}80%{background:#6a4c93}100%{background:#ff595e}}
+#status{margin-top:12px;font-weight:700}
+#winText{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:56px;font-weight:900;color:#ff3060;text-shadow:0 0 20px rgba(255,48,96,.5);opacity:0;pointer-events:none;z-index:1000}
+canvas#confetti{position:fixed;top:0;left:0;width:100vw;height:100vh;pointer-events:none;z-index:999}
+.options-right{margin-left:auto;display:flex;gap:8px;align-items:center}
+.small{font-size:13px;color:#555;margin-top:8px}
+.toggle {display:inline-flex;align-items:center;gap:6px}
+@media(max-width:640px){:root{--cell-size:36px;--gap:4px}}
+</style>
+</head>
+<body>
+<canvas id="confetti"></canvas>
+<div id="winText"></div>
+
+<div class="app">
+  <h1>Caro </h1>
+
+  <div class="controls">
+    <label>Kích thước:
+      <select id="size">
+        <option value="3">3 x 3</option>
+        <option value="5" selected>5 x 5</option>
+        <option value="10">10 x 10</option>
+      </select>
+    </label>
+
+    <label>Chế độ:
+      <select id="mode">
+        <option value="ai" selected>Đấu máy</option>
+        <option value="pvp">2 người (PvP)</option>
+      </select>
+    </label>
+
+    <label>Độ khó:
+      <select id="diff">
+        <option value="easy">Dễ</option>
+        <option value="medium">Trung bình</option>
+        <option value="hard">Khó</option>
+        <option value="super">Siêu Khó</option>
+      </select>
+    </label>
+
+    <div class="options-right">
+      <div class="toggle">
+        <label for="soundToggle">Âm thanh</label>
+        <input id="soundToggle" type="checkbox" checked />
+      </div>
+      <button id="startBtn" class="primary">Bắt đầu</button>
+      <button id="resetBtn">Chơi lại</button>
+    </div>
+  </div>
+
+  <div id="board" role="grid" aria-live="polite"></div>
+  <div id="status">Nhấn Bắt đầu để tạo bàn mới.</div>
+  <div class="small"> </div>
+</div>
+
+<script>
+/* =========================
+  Caro Pro Ultimate — Single File
+  Features:
+  - Sizes: 3x3, 5x5, 10x10
+  - Modes: PvP or AI
+  - AI levels: easy / medium / hard / super
+  - Sounds on/off
+  - Rainbow win + confetti + win text
+  - Minimax/αβ for hard/super with node limits for large boards
+  ========================= */
+
+//// UI elements
+const sizeEl = document.getElementById('size');
+const modeEl = document.getElementById('mode');
+const diffEl = document.getElementById('diff');
+const startBtn = document.getElementById('startBtn');
+const resetBtn = document.getElementById('resetBtn');
+const soundToggle = document.getElementById('soundToggle');
+const boardEl = document.getElementById('board');
+const statusEl = document.getElementById('status');
+const winTextEl = document.getElementById('winText');
+const confetti = document.getElementById('confetti');
+const ctx = confetti.getContext('2d');
+
+let size = 5, winLen = 5;
+let cells = [];
+let current = 'X';
+let gameOver = false;
+let mode = 'ai';
+let diff = 'medium';
+let confettiPieces = [];
+let audioEnabled = true;
+
+/* ---- Audio setup (Web Audio) ---- */
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null; // lazy init (start on first user gesture)
+function ensureAudio(){
+  if(!audioEnabled) return;
+  if(!audioCtx) audioCtx = new AudioCtx();
+}
+function playClick(){
+  if(!audioEnabled) return;
+  ensureAudio();
+  try {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'triangle';
+    o.frequency.value = 520;
+    g.gain.value = 0.06;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.08);
+  } catch(e){}
+}
+function playWin(){
+  if(!audioEnabled) return;
+  ensureAudio();
+  try {
+    const now = audioCtx.currentTime;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(440, now);
+    o.frequency.exponentialRampToValueAtTime(1100, now + 0.45);
+    g.gain.setValueAtTime(0.12, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.9);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(now + 0.9);
+  } catch(e){}
+}
+
+/* ---- Board UI & game init ---- */
+function updateWinLen(){ winLen = size >= 5 ? 5 : size; }
+function createBoardUI(){
+  boardEl.style.gridTemplateColumns = `repeat(${size}, var(--cell-size))`;
+  boardEl.style.gridTemplateRows = `repeat(${size}, var(--cell-size))`;
+  boardEl.innerHTML = '';
+  for(let i=0;i<size*size;i++){
+    const c = document.createElement('div');
+    c.className = 'cell';
+    c.dataset.idx = i;
+    c.addEventListener('click', ()=>onCellClick(i));
+    boardEl.appendChild(c);
+  }
+}
+function startGame(){
+  size = parseInt(sizeEl.value,10);
+  mode = modeEl.value;
+  diff = diffEl.value;
+  current = 'X';
+  gameOver = false;
+  updateWinLen();
+  cells = new Array(size*size).fill('');
+  createBoardUI();
+  statusEl.textContent = mode === 'pvp' ? `Lượt: ${current} (PvP)` : `Lượt: X (Bạn) — Máy: O (${diff})`;
+  // lazy audio resume on first interaction for browsers that require user gesture
+  boardEl.addEventListener('click', resumeAudioOnce, { once: true });
+}
+function resumeAudioOnce(){ if(!audioCtx && audioEnabled){ try{ audioCtx = new AudioCtx(); audioCtx.resume(); }catch(e){} } }
+
+/* ---- Click handler ---- */
+function onCellClick(i){
+  if(gameOver) return;
+  if(cells[i] !== '') return;
+  if(mode === 'ai' && current !== 'X') return;
+  playMove(i, current);
+  if(gameOver) return;
+  if(mode === 'ai' && current === 'O'){
+    if(diff === 'easy') setTimeout(aiEasy, 140);
+    else if(diff === 'medium') setTimeout(aiMedium, 200);
+    else if(diff === 'hard') setTimeout(aiHard, 260);
+    else setTimeout(aiSuper, 300);
+  }
+}
+
+function playMove(i, sym){
+  if(gameOver || cells[i] !== '') return;
+  cells[i] = sym;
+  const el = boardEl.children[i];
+  el.textContent = sym;
+  el.classList.add(sym === 'X' ? 'x' : 'o');
+  playClick();
+
+  const winCells = checkWinCells(i, cells);
+  if(winCells){
+    gameOver = true;
+    winCells.forEach(idx => boardEl.children[idx].classList.add('win'));
+    statusEl.textContent = sym === 'X' ? '🎉 X thắng!' : '💀 O thắng!';
+    playWin();
+    showWinEffect();
+    return;
+  }
+  if(cells.every(v => v !== '')){ gameOver = true; statusEl.textContent = 'Hòa!'; return; }
+
+  // next turn
+  current = (sym === 'X') ? 'O' : 'X';
+  statusEl.textContent = mode === 'pvp' ? `Lượt: ${current}` : (current === 'X' ? 'Lượt: X (Bạn)' : 'Lượt: O (Máy)');
+}
+
+/* =========================
+   Win detection (robust)
+   ========================= */
+function checkWinCells(index, arr){
+  const symbol = arr[index];
+  if(!symbol) return null;
+  const dirs = [1, size, size+1, size-1]; // horiz, vert, diag-down-right, diag-down-left
+  for(const d of dirs){
+    let seq = [index];
+    // forward
+    let i = index + d;
+    while(i >= 0 && i < arr.length && arr[i] === symbol && isValidStep(index, i, d)){
+      seq.push(i); i += d;
+    }
+    // backward
+    i = index - d;
+    while(i >= 0 && i < arr.length && arr[i] === symbol && isValidStep(index, i, d)){
+      seq.unshift(i); i -= d;
+    }
+    if(seq.length >= winLen){
+      if(seq.length === winLen) return seq;
+      const pos = seq.indexOf(index);
+      let start = Math.max(0, pos - Math.floor(winLen/2));
+      if(start + winLen > seq.length) start = seq.length - winLen;
+      return seq.slice(start, start + winLen);
+    }
+  }
+  return null;
+}
+function isValidStep(baseIdx, otherIdx, dir){
+  const br = Math.floor(baseIdx / size), bc = baseIdx % size;
+  const or = Math.floor(otherIdx / size), oc = otherIdx % size;
+  if(dir === 1 || dir === -1) return br === or; // same row
+  if(dir === size || dir === -size) return bc === oc; // same col
+  if(dir === size+1 || dir === -(size+1)) return (or - br) === (oc - bc);
+  if(dir === size-1 || dir === -(size-1)) return (or - br) === -(oc - bc);
+  return false;
+}
+
+/* =========================
+   AI implementations
+   ========================= */
+
+/* EASY: random near or random */
+function aiEasy(){
+  if(gameOver) return;
+  const empties = cells.map((v,i)=> v===''?i:null).filter(v=>v!==null);
+  const near = findNeighborEmpties(1);
+  const pool = near.length ? near : empties;
+  const pick = pool[Math.floor(Math.random()*pool.length)];
+  playMove(pick, 'O');
+}
+
+/* MEDIUM: win/block + growth heuristic */
+function aiMedium(){
+  if(gameOver) return;
+  const winO = findWinningMove('O'); if(winO !== null){ playMove(winO,'O'); return; }
+  const blockX = findWinningMove('X'); if(blockX !== null){ playMove(blockX,'O'); return; }
+  const growth = findBestGrowthMove('O'); if(growth !== null){ playMove(growth,'O'); return; }
+  // else choose near random
+  aiEasy();
+}
+
+/* HARD: α-β depth-limited (tuned per size) */
+function aiHard(){
+  if(gameOver) return;
+  if(size === 3){
+    const best = minimaxRoot(cells.slice(), 'O');
+    if(best && typeof best.index === 'number') playMove(best.index, 'O');
+    return;
+  }
+  const winO = findWinningMove('O'); if(winO !== null){ playMove(winO,'O'); return; }
+  const blockX = findWinningMove('X'); if(blockX !== null){ playMove(blockX,'O'); return; }
+
+  let depth = (size === 5) ? 4 : 3; // adjust if needed
+  const res = minimaxAlphaBeta(cells.slice(), depth, -Infinity, Infinity, true, {nodeLimit: 120000});
+  if(res && typeof res.index === 'number') playMove(res.index, 'O');
+  else aiMedium();
+}
+
+/* SUPER: iterative deepening with node cap */
+function aiSuper(){
+  if(gameOver) return;
+  if(size === 3){
+    const best = minimaxRoot(cells.slice(), 'O');
+    if(best && typeof best.index === 'number') playMove(best.index, 'O');
+    return;
+  }
+  const winO = findWinningMove('O'); if(winO !== null){ playMove(winO,'O'); return; }
+  const blockX = findWinningMove('X'); if(blockX !== null){ playMove(blockX,'O'); return; }
+
+  const maxNodeBudget = (size===10) ? 250000 : 180000;
+  const targetDepth = (size===5) ? 5 : 4;
+  let bestMove = null;
+  for(let d=2; d<=targetDepth; d++){
+    const res = minimaxAlphaBeta(cells.slice(), d, -Infinity, Infinity, true, {nodeLimit: maxNodeBudget});
+    if(res.nodeLimitExceeded) break;
+    if(res && typeof res.index === 'number') bestMove = res.index;
+    if(res && Math.abs(res.score) > 900000) break;
+  }
+  if(bestMove !== null) playMove(bestMove, 'O');
+  else aiHard();
+}
+
+/* -------------------------
+  Helpers for AI
+  ------------------------- */
+function findWinningMove(symbol){
+  for(let i=0;i<cells.length;i++){
+    if(cells[i] !== '') continue;
+    cells[i] = symbol;
+    const w = checkWinCells(i, cells);
+    cells[i] = '';
+    if(w) return i;
+  }
+  return null;
+}
+function findNeighborEmpties(radius=1){
+  const set = new Set();
+  for(let i=0;i<cells.length;i++){
+    if(cells[i] === '') continue;
+    const r = Math.floor(i/size), c = i % size;
+    for(let dr=-radius; dr<=radius; dr++){
+      for(let dc=-radius; dc<=radius; dc++){
+        if(dr===0 && dc===0) continue;
+        const nr = r+dr, nc = c+dc;
+        if(nr>=0 && nr<size && nc>=0 && nc<size){
+          const idx = nr*size + nc;
+          if(cells[idx] === '') set.add(idx);
+        }
+      }
+    }
+  }
+  return Array.from(set);
+}
+function generateCandidateMoves(arr){
+  // radius 2 neighbors to reduce branching; fallback to center / empties
+  const used = new Set();
+  const radius = 2;
+  for(let i=0;i<arr.length;i++){
+    if(arr[i] === '') continue;
+    const r = Math.floor(i/size), c = i % size;
+    for(let dr=-radius; dr<=radius; dr++){
+      for(let dc=-radius; dc<=radius; dc++){
+        const nr = r+dr, nc = c+dc;
+        if(nr>=0 && nr<size && nc>=0 && nc<size){
+          const idx = nr*size + nc;
+          if(arr[idx] === '') used.add(idx);
+        }
+      }
+    }
+  }
+  const near = Array.from(used);
+  if(near.length) return near;
+  const center = Math.floor(arr.length/2);
+  if(arr[center] === '') return [center];
+  const empties = [];
+  for(let i=0;i<arr.length;i++) if(arr[i] === '') empties.push(i);
+  return empties;
+}
+function findBestGrowthMove(symbol){
+  let best=null,bestScore=-Infinity;
+  const cand = generateCandidateMoves(cells);
+  for(const i of cand){
+    if(cells[i] !== '') continue;
+    cells[i] = symbol;
+    const score = evaluatePosition(i, symbol);
+    cells[i] = '';
+    if(score > bestScore){ bestScore = score; best = i; }
+  }
+  return bestScore > 0 ? best : null;
+}
+function evaluatePosition(index, symbol){
+  let maxLen = 0;
+  const dirs = [1, size, size+1, size-1];
+  for(const d of dirs){
+    let len = 1;
+    let i = index + d;
+    while(i>=0 && i<cells.length && cells[i] === symbol && Math.abs((i%size)-(index%size)) <= winLen){ len++; i += d; }
+    i = index - d;
+    while(i>=0 && i<cells.length && cells[i] === symbol && Math.abs((i%size)-(index%size)) <= winLen){ len++; i -= d; }
+    if(len > maxLen) maxLen = len;
+  }
+  return maxLen;
+}
+
+/* =========================
+   Heuristic eval & minimax αβ
+   ========================= */
+function evaluateBoard(arr){
+  let score = 0;
+  const dirs = [1, size, size+1, size-1];
+  const inBounds = i => i>=0 && i < arr.length;
+  for(let i=0;i<arr.length;i++){
+    const s = arr[i];
+    if(s === '') continue;
+    for(const d of dirs){
+      const prev = i - d;
+      if(inBounds(prev) && arr[prev] === s) continue;
+      let len = 0; let j = i;
+      while(inBounds(j) && arr[j] === s){ len++; j += d; }
+      const forwardOpen = inBounds(j) && arr[j] === '';
+      const before = i - d;
+      const backwardOpen = inBounds(before) && arr[before] === '';
+      const openEnds = (forwardOpen?1:0) + (backwardOpen?1:0);
+      const w = weight(len, openEnds);
+      score += (s === 'O' ? w : -w);
+    }
+  }
+  return score;
+}
+function weight(len, openEnds){
+  if(len <= 0) return 0;
+  if(len >= winLen) return 1000000;
+  let base = Math.pow(10, Math.min(6, len));
+  if(len === winLen - 1 && openEnds > 0) base *= 30;
+  if(openEnds === 2) base *= 3;
+  else if(openEnds === 1) base *= 1.2;
+  return base;
+}
+
+/* ---- Minimax full for 3x3 ---- */
+function minimaxRoot(boardArr, player){
+  let bestScore = -Infinity, bestIndex = -1;
+  const empties = boardArr.map((v,i)=> v===''?i:null).filter(v=>v!==null);
+  for(const idx of empties){
+    boardArr[idx] = player;
+    const score = minimax(boardArr, false);
+    boardArr[idx] = '';
+    if(score > bestScore){ bestScore = score; bestIndex = idx; }
+  }
+  return { index: bestIndex, score: bestScore };
+}
+function minimax(arr, isMaximizing){
+  const term = evaluateTerminal(arr);
+  if(term !== null) return term;
+  const empties = arr.map((v,i)=> v===''?i:null).filter(v=>v!==null);
+  if(isMaximizing){
+    let best = -Infinity;
+    for(const idx of empties){
+      arr[idx] = 'O';
+      best = Math.max(best, minimax(arr, false));
+      arr[idx] = '';
+    }
+    return best;
+  } else {
+    let best = Infinity;
+    for(const idx of empties){
+      arr[idx] = 'X';
+      best = Math.min(best, minimax(arr, true));
+      arr[idx] = '';
+    }
+    return best;
+  }
+}
+function evaluateTerminal(arr){
+  for(let i=0;i<arr.length;i++){
+    if(arr[i] === '') continue;
+    const w = checkWinCells(i, arr);
+    if(w) return arr[i] === 'O' ? 10 : -10;
+  }
+  if(arr.every(v=>v!=='')) return 0;
+  return null;
+}
+
+/* ---- Minimax α-β with node-limit support ---- */
+function minimaxAlphaBeta(arr, depth, alpha, beta, maximizingPlayer, options = {nodeLimit: 100000}){
+  const nodeCounter = {count:0, limit: options.nodeLimit || 100000};
+  function helper(a, d, alpha, beta, maximizing){
+    nodeCounter.count++;
+    if(nodeCounter.count > nodeCounter.limit) return {score: evaluateBoard(a), index: undefined, cutoff:true};
+    const term = terminalScore(a);
+    if(term !== null) return {score: term, index: undefined};
+    if(d === 0) return {score: evaluateBoard(a), index: undefined};
+
+    const moves = generateCandidateMoves(a);
+    let bestIndex = undefined;
+    if(maximizing){
+      let value = -Infinity;
+      const wmove = findWinningMoveInArray(a, 'O');
+      if(wmove !== null) return {score: 1000000, index: wmove, nodes: nodeCounter.count};
+      const bmove = findWinningMoveInArray(a, 'X');
+      if(bmove !== null) return {score: 900000, index: bmove, nodes: nodeCounter.count};
+      for(const m of moves){
+        a[m] = 'O';
+        const res = helper(a, d-1, alpha, beta, false);
+        a[m] = '';
+        if(res.cutoff) return res;
+        if(res.score > value){ value = res.score; bestIndex = m; }
+        alpha = Math.max(alpha, value);
+        if(alpha >= beta) break;
+      }
+      return {score: value, index: bestIndex, nodes: nodeCounter.count};
+    } else {
+      let value = Infinity;
+      for(const m of moves){
+        a[m] = 'X';
+        const res = helper(a, d-1, alpha, beta, true);
+        a[m] = '';
+        if(res.cutoff) return res;
+        if(res.score < value){ value = res.score; bestIndex = m; }
+        beta = Math.min(beta, value);
+        if(alpha >= beta) break;
+      }
+      return {score: value, index: bestIndex, nodes: nodeCounter.count};
+    }
+  }
+  const out = helper(arr, depth, alpha, beta, maximizingPlayer);
+  out.nodes = out.nodes || nodeCounter.count;
+  out.nodeLimitExceeded = nodeCounter.count > nodeCounter.limit;
+  return out;
+}
+function terminalScore(arr){
+  for(let i=0;i<arr.length;i++){
+    if(arr[i] === '') continue;
+    if(checkWinCells(i, arr)) return arr[i] === 'O' ? 1000000 : -1000000;
+  }
+  if(arr.every(v=>v!=='')) return 0;
+  return null;
+}
+function findWinningMoveInArray(arr, symbol){
+  for(let i=0;i<arr.length;i++){
+    if(arr[i] !== '') continue;
+    arr[i] = symbol;
+    const w = checkWinCells(i, arr);
+    arr[i] = '';
+    if(w) return i;
+  }
+  return null;
+}
+
+/* =========================
+   Small wrappers & util
+   ========================= */
+function findWinningMove(symbol){
+  return findWinningMoveInArray(cells, symbol);
+}
+
+/* =========================
+   Win effect: confetti + text
+   ========================= */
+function showWinEffect(){
+  winTextEl.textContent = '🎉 Chiến thắng! 🎉';
+  winTextEl.style.animation = 'none';
+  void winTextEl.offsetWidth;
+  winTextEl.style.animation = 'winPop 1.5s forwards';
+  startConfetti();
+  setTimeout(stopConfetti, 3200);
+}
+function startConfetti(){
+  confettiPieces = [];
+  const count = Math.min(450, Math.max(120, size * size * 3));
+  for(let i=0;i<count;i++){
+    confettiPieces.push({
+      x: Math.random()*window.innerWidth,
+      y: Math.random()*window.innerHeight - 200,
+      size: 3 + Math.random()*8,
+      color: `hsl(${Math.random()*360},80%,60%)`,
+      speed: 2 + Math.random()*4,
+      angle: Math.random()*2*Math.PI
+    });
+  }
+  requestAnimationFrame(drawConfetti);
+}
+function drawConfetti(){
+  ctx.clearRect(0,0,confetti.width,confetti.height);
+  confettiPieces.forEach(p=>{
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x,p.y,p.size,p.size);
+    p.y += p.speed; p.x += Math.sin(p.angle) * 2; p.angle += 0.03;
+    if(p.y > window.innerHeight + 10){ p.y = -10; p.x = Math.random()*window.innerWidth; }
+  });
+  if(confettiPieces.length) requestAnimationFrame(drawConfetti);
+}
+function stopConfetti(){ confettiPieces = []; ctx.clearRect(0,0,confetti.width,confetti.height); }
+
+/* =========================
+   DOM bindings & init
+   ========================= */
+startBtn.addEventListener('click', startGame);
+resetBtn.addEventListener('click', ()=> startGame());
+soundToggle.addEventListener('change', e => { audioEnabled = e.target.checked; if(!audioEnabled && audioCtx){ try{ audioCtx.suspend(); }catch(e){} } else if(audioEnabled && audioCtx){ try{ audioCtx.resume(); }catch(e){} } });
+
+window.addEventListener('keydown', e => { if(e.key.toLowerCase() === 'r') startGame(); });
+
+function resizeCanvas(){ confetti.width = window.innerWidth; confetti.height = window.innerHeight; }
+window.addEventListener('resize', resizeCanvas); resizeCanvas();
+
+/* add keyframes style for win text */
+const kstyle = document.createElement('style');
+kstyle.textContent = `@keyframes winPop{0%{transform:translate(-50%,-50%) scale(.5);opacity:0}50%{transform:translate(-50%,-50%) scale(1.15);opacity:1}100%{transform:translate(-50%,-50%) scale(1);opacity:0}}`;
+document.head.appendChild(kstyle);
+
+/* init */
+startGame();
+
+</script>
+</body>
+</html>
